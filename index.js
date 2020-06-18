@@ -27,14 +27,6 @@ var flags = [
 ];
 
 /**
- * uid for emitter
- *
- * @api private
- */
-
-var uid = 'emitter';
-
-/**
  * Socket.IO redis based emitter.
  *
  * @param {Object} redis client (optional)
@@ -130,7 +122,7 @@ Emitter.prototype.emit = function(){
     flags: this._flags
   };
 
-  var msg = msgpack.encode([uid, packet, opts]);
+  var msg = msgpack.encode([packet, opts]);
   var channel = this.channel;
   if (opts.rooms && opts.rooms.length === 1) {
     channel += opts.rooms[0] + '#';
