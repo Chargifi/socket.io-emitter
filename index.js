@@ -5,14 +5,15 @@
 
 var client = require('redis').createClient;
 var parser = require('socket.io-parser');
-var msgpack = require('notepack.io');
+var hasBin = require('has-binary');
+var msgpack = require('msgpack-js');
 var debug = require('debug')('socket.io-emitter');
 
 /**
  * Module exports.
  */
 
-module.exports = init;
+module.exports = Emitter;
 
 /**
  * Flags.
@@ -21,10 +22,18 @@ module.exports = init;
  */
 
 var flags = [
-  'json',
-  'volatile',
-  'broadcast'
+    'json',
+    'volatile',
+    'broadcast'
 ];
+
+/**
+ * uid for emitter
+ *
+ * @api private
+ */
+
+var uid = 'emitter';
 
 /**
  * Socket.IO redis based emitter.
@@ -34,39 +43,32 @@ var flags = [
  * @api public
  */
 
-function init(redis, opts){
-  opts = opts || {};
+function Emitter(redis, opts){
+    if (!(this instanceof Emitter)) return new Emitter(redis, opts);
+    opts = opts || {};
 
-  if ('string' == typeof redis) {
-    redis = client(redis);
-  }
+    if ('string' == typeof redis) {
+        redis = client(redis);
+    }
 
-  if (redis && !redis.hset) {
-    opts = redis;
-    redis = null;
-  }
+    if (redis && !redis.hset) {
+        opts = redis;
+        redis = null;
+    }
 
-  if (!redis) {
-    if (!opts.socket && !opts.host) throw new Error('Missing redis `host`');
-    if (!opts.socket && !opts.port) throw new Error('Missing redis `port`');
-    redis = opts.socket
-      ? client(opts.socket)
-      : client(opts.port, opts.host);
-  }
+    if (!redis) {
+        if (!opts.socket && !opts.host) throw new Error('Missing redis `host`');
+        if (!opts.socket && !opts.port) throw new Error('Missing redis `port`');
+        redis = opts.socket
+            ? client(opts.socket)
+            : client(opts.port, opts.host);
+    }
 
-  var prefix = opts.key || 'socket.io';
+    this.redis = redis;
+    this.prefix = (opts.key || 'socket.io');
 
-  return new Emitter(redis, prefix, '/');
-}
-
-function Emitter(redis, prefix, nsp){
-  this.redis = redis;
-  this.prefix = prefix;
-  this.nsp = nsp;
-  this.channel = this.prefix + '#' + nsp + '#';
-
-  this._rooms = [];
-  this._flags = {};
+    this._rooms = [];
+    this._flags = {};
 }
 
 /**
@@ -74,11 +76,11 @@ function Emitter(redis, prefix, nsp){
  */
 
 flags.forEach(function(flag){
-  Emitter.prototype.__defineGetter__(flag, function(){
-    debug('flag %s on', flag);
-    this._flags[flag] = true;
-    return this;
-  });
+    Emitter.prototype.__defineGetter__(flag, function(){
+        debug('flag %s on', flag);
+        this._flags[flag] = true;
+        return this;
+    });
 });
 
 /**
@@ -88,22 +90,24 @@ flags.forEach(function(flag){
  */
 
 Emitter.prototype.in =
-Emitter.prototype.to = function(room){
-  if (!~this._rooms.indexOf(room)) {
-    debug('room %s', room);
-    this._rooms.push(room);
-  }
-  return this;
-};
+    Emitter.prototype.to = function(room){
+        if (!~this._rooms.indexOf(room)) {
+            debug('room %s', room);
+            this._rooms.push(room);
+        }
+        return this;
+    };
 
 /**
- * Return a new emitter for the given namespace.
+ * Limit emission to certain `namespace`.
  *
  * @param {String} namespace
  */
 
-Emitter.prototype.of = function(nsp){
-  return new Emitter(this.redis, this.prefix, nsp);
+Emitter.prototype.of = function(nsp) {
+    debug('nsp set to %s', nsp);
+    this._flags.nsp = nsp;
+    return this;
 };
 
 /**
@@ -113,26 +117,54 @@ Emitter.prototype.of = function(nsp){
  */
 
 Emitter.prototype.emit = function(){
-  // packet
-  var args = Array.prototype.slice.call(arguments);
-  var packet = { type: parser.EVENT, data: args, nsp: this.nsp };
+    var self = this;
 
-  var opts = {
-    rooms: this._rooms,
-    flags: this._flags
-  };
+    // packet
+    var args = Array.prototype.slice.call(arguments);
+    var packet = {};
+    var callback = args[args.length - 1];
+    callback = typeof callback === 'function' ? callback : null;
+    if (callback) {
+        delete args[args.length - 1];
+    }
+    packet.type = hasBin(args) ? parser.BINARY_EVENT : parser.EVENT;
+    packet.data = args;
+    // set namespace to packet
+    if (this._flags.nsp) {
+        packet.nsp = this._flags.nsp;
+        delete this._flags.nsp;
+    } else {
+        packet.nsp = '/';
+    }
 
-  var msg = msgpack.encode([packet, opts]);
-  var channel = this.channel;
-  if (opts.rooms && opts.rooms.length === 1) {
-    channel += opts.rooms[0] + '#';
-  }
-  debug('publishing message to channel %s', channel);
-  this.redis.publish(channel, msg);
+    var opts = {
+        rooms: this._rooms,
+        flags: this._flags
+    };
+    var chn = this.prefix + '#emitter';
+    var msg = msgpack.encode([packet, opts]);
 
-  // reset state
-  this._rooms = [];
-  this._flags = {};
+    // publish
+    if (opts.rooms && opts.rooms.length) {
+        opts.rooms.forEach(function(room) {
+            var chnRoom = chn + room + '#';
+            if (callback) {
+                self.redis.publish(chnRoom, msg, callback);
+            } else {
+                self.redis.publish(chnRoom, msg);
+            }
+        });
+    } else {
+        if (callback) {
+            this.redis.publish(chn, msg, callback);
+        } else {
+            this.redis.publish(chn, msg);
+        }
+    }
 
-  return this;
+    // reset state
+    this._rooms = [];
+    this._flags = {};
+
+    return this;
 };
